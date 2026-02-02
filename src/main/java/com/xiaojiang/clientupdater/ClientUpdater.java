@@ -43,7 +43,7 @@ public class ClientUpdater {
         MinecraftForge.EVENT_BUS.register(this);
 
         // 注册配置文件
-        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, Config.SPEC);
+        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, Config.SPEC, "clientupdater-client.toml");
 
     }
 
