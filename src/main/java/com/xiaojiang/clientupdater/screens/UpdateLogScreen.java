@@ -57,7 +57,7 @@ public class UpdateLogScreen extends Screen {
 
                 this.minecraft.setScreen(this);
             }, serverURL, true));
-        }).bounds(this.width / 2 - 155, this.height - 27, 150, 20).build());// 添加官网跳转按钮
+        }).bounds(this.width / 2 - 100, this.height - 50, 200, 20).build());// 添加官网跳转按钮，优化位置和大小
         if (need_update) {
             this.layout.addToFooter(Button.builder(Component.translatable("gui.clientupdater.update"), (p_280801_) -> {
                 this.minecraft.setScreen(new UpdateScreen(this.update, this.serverURL));

@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.function.Consumer;
 
 public class Tools {
 
@@ -45,39 +46,100 @@ public class Tools {
         return sb.toString();
     }
 
-    public static String downloadByUrl(String urlStr, String savePath) {
+    /**
+     * 通过URL下载文件，并显示进度条
+     * @param urlStr 下载链接
+     * @param savePath 保存路径
+     * @param progressCallback 进度回调函数，接收进度百分比(0-100)
+     * @return 下载的文件名
+     */
+    public static String downloadByUrl(String urlStr, String savePath, Consumer<Integer> progressCallback) {
+        HttpURLConnection conn = null;
+        InputStream inputStream = null;
+        java.io.FileOutputStream outputStream = null;
         try {
             URL url = new URL(urlStr);
+            // 建立连接
+            conn = (HttpURLConnection) url.openConnection();
+            conn.connect();
 
-            // 打开连接
-            try (InputStream inputStream = url.openStream()) {
-                // 获取文件名
-                String fileName = getFileName(urlStr);
-                String path = "";
-                // 创建保存目录
-                int index = fileName.lastIndexOf("/");
-                if (index > -1) {
-                    // LOGGER.info(filepath.substring(0, index));
-                    path = savePath + '/' + fileName.substring(0, index);
-                    fileName = fileName.substring(index + 1, fileName.length());
-                } else {
-                    path = savePath;
+            // 获取文件总大小，用于计算进度
+            long totalSize = conn.getContentLengthLong();
+
+            // 获取文件名
+            String fileName = "";
+            // 优先从Header中获取文件名
+            if (conn.getHeaderField("Path") != null) {
+                fileName = conn.getHeaderField("Path");
+                // 解码文件名，防止乱码
+                fileName = URLDecoder.decode(URLEncoder.encode(fileName, "latin1"), "utf-8");
+            } else {
+                // 如果Header中没有，尝试调用现有方法或解析URL
+                fileName = getFileName(urlStr);
+                if (fileName == null || fileName.isEmpty()) {
+                    fileName = urlStr.substring(urlStr.lastIndexOf("/") + 1);
                 }
-                File saveDir = new File(path);
-                if (!saveDir.exists()) {
-                    saveDir.mkdirs();
-                }
-
-                // 创建文件路径
-                Path filePath = Path.of(path, fileName);
-
-                // 下载文件
-                Files.copy(inputStream, filePath, StandardCopyOption.REPLACE_EXISTING);
-
-                return fileName;
             }
+
+            String path = "";
+            // 处理文件名中包含路径的情况，创建对应子目录
+            int index = fileName.lastIndexOf("/");
+            if (index > -1) {
+                // LOGGER.info(filepath.substring(0, index));
+                path = savePath + '/' + fileName.substring(0, index);
+                fileName = fileName.substring(index + 1, fileName.length());
+            } else {
+                path = savePath;
+            }
+            File saveDir = new File(path);
+            if (!saveDir.exists()) {
+                saveDir.mkdirs();
+            }
+
+            // 创建文件路径
+            File file = new File(saveDir, fileName);
+
+            // 准备输入输出流
+            inputStream = conn.getInputStream();
+            outputStream = new java.io.FileOutputStream(file);
+
+            byte[] buffer = new byte[4096]; // 缓冲区大小 4KB
+            int bytesRead;
+            long downloadedSize = 0;
+
+            int lastProgress = -1;
+            // 循环读取数据并写入文件
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+                downloadedSize += bytesRead;
+
+                // 计算并更新进度
+                if (totalSize > 0) {
+                    int progress = (int) (downloadedSize * 100 / totalSize);
+                    // 只有进度发生变化时才回调，避免过于频繁
+                    if (progress != lastProgress) {
+                        if (progressCallback != null) {
+                            progressCallback.accept(progress);
+                        }
+                        lastProgress = progress;
+                    }
+                }
+            }
+            
+            // 记录日志
+            LOGGER.info("下载完成: " + fileName);
+
+            return fileName;
         } catch (IOException e) {
             e.printStackTrace();
+        } finally {
+            // 关闭流资源
+            try {
+                if (inputStream != null) inputStream.close();
+                if (outputStream != null) outputStream.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
 
         return null;

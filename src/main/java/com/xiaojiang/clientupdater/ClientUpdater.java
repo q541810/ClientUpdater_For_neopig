@@ -27,7 +27,7 @@ import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(ClientUpdater.MODID)
 public class ClientUpdater {
     // Define mod id in a common place for everything to reference
-    public static final String MODID = "clientupdater";
+    public static final String MODID = "clientupdater_for_neopig";
     // Directly reference a slf4j logger
     private static final Logger LOGGER = LogUtils.getLogger();
 
