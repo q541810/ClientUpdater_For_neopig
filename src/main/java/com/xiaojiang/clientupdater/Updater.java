@@ -1,8 +1,19 @@
 package com.xiaojiang.clientupdater;
 
 import java.io.File;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
@@ -84,107 +95,137 @@ public class Updater extends Thread {
     private void validateFiles() {
         this.currentStep = "正在校验文件完整性...";
         this.currentProgress = 0;
-        
-        // 校验 mods
-        validateList(update.mods_list, "./mods", "mods");
-        
-        // 校验 config
-        validateList(update.config_list, "./config", "config");
+
+        File modsDir = new File("./mods");
+        File configDir = new File("./config");
+
+        List<File> modFiles = collectFiles(modsDir);
+        List<File> configFiles = collectFiles(configDir);
+
+        int totalFiles = modFiles.size() + configFiles.size();
+        AtomicInteger hashedCount = new AtomicInteger(0);
+
+        Set<String> modMd5Set = ConcurrentHashMap.newKeySet();
+        Set<String> configMd5Set = ConcurrentHashMap.newKeySet();
+
+        int threads = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), 6));
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> futures = new ArrayList<>();
+
+        try {
+            for (File file : modFiles) {
+                futures.add(pool.submit(() -> {
+                    String md5 = Tools.getMD5(file);
+                    if (!md5.isEmpty()) {
+                        modMd5Set.add(md5);
+                    }
+                    int finished = hashedCount.incrementAndGet();
+                    if (!this.currentStep.startsWith("校验失败")) {
+                        this.currentProgress = totalFiles == 0 ? 100 : (int) (finished * 100.0 / totalFiles);
+                    }
+                }));
+            }
+
+            for (File file : configFiles) {
+                futures.add(pool.submit(() -> {
+                    String md5 = Tools.getMD5(file);
+                    if (!md5.isEmpty()) {
+                        configMd5Set.add(md5);
+                    }
+                    int finished = hashedCount.incrementAndGet();
+                    if (!this.currentStep.startsWith("校验失败")) {
+                        this.currentProgress = totalFiles == 0 ? 100 : (int) (finished * 100.0 / totalFiles);
+                    }
+                }));
+            }
+
+            for (Future<?> future : futures) {
+                future.get();
+            }
+        } catch (Exception e) {
+            this.hasError = true;
+            this.currentStep = "错误：文件校验异常，请重试！";
+            LOGGER.error("校验阶段出现异常", e);
+            return;
+        } finally {
+            pool.shutdown();
+            try {
+                pool.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        }
+
+        validateExpected(update.mods_list, "./mods", modMd5Set);
+        if (this.hasError) return;
+
+        validateExpected(update.config_list, "./config", configMd5Set);
+        if (this.hasError) return;
+
+        this.currentProgress = 100;
     }
 
-    private void validateList(java.util.List<String> list, String path, String type) {
-        if (list == null || list.isEmpty()) return;
-        
-        File dir = new File(path);
-        File[] files = dir.listFiles();
-        Map<String, File> fileMap = new HashMap<>();
-        
-        // 建立 MD5 -> File 映射，方便查找
-        if (files != null) {
-            for (File file : files) {
-                if (file.isFile()) {
-                    fileMap.put(Tools.getMD5(file.getPath()), file);
-                }
+    private void validateExpected(List<String> expectedMd5List, String savePath, Set<String> localMd5Set) {
+        if (expectedMd5List == null || expectedMd5List.isEmpty()) return;
+
+        for (String expectedMd5 : expectedMd5List) {
+            if (localMd5Set.contains(expectedMd5)) continue;
+
+            boolean repaired = repairAndVerify(expectedMd5, savePath, localMd5Set);
+            if (!repaired) {
+                this.hasError = true;
+                this.currentStep = "错误：文件修复失败，请检查网络！";
+                LOGGER.error("文件最终校验失败: " + expectedMd5);
+                return;
+            }
+        }
+    }
+
+    private boolean repairAndVerify(String expectedMd5, String savePath, Set<String> localMd5Set) {
+        LOGGER.warn("文件校验失败 (MD5: " + expectedMd5 + ")，尝试重新下载...");
+        this.currentStep = "校验失败，正在修复: " + expectedMd5;
+
+        for (int i = 0; i < 3; i++) {
+            this.currentProgress = 0;
+            String relativePath = Tools.downloadByUrl(server_url + "api/download/" + expectedMd5, savePath, (progress) -> {
+                this.currentProgress = progress;
+            });
+
+            if (relativePath == null || relativePath.isEmpty()) {
+                continue;
+            }
+
+            File downloadedFile = new File(savePath, relativePath.replace('/', File.separatorChar));
+            String actualMd5 = Tools.getMD5(downloadedFile);
+            if (actualMd5.equalsIgnoreCase(expectedMd5)) {
+                localMd5Set.add(expectedMd5);
+                LOGGER.info("修复成功: " + expectedMd5);
+                this.currentStep = "正在校验文件完整性...";
+                return true;
             }
         }
 
-        int totalCount = list.size();
-        int checkedCount = 0;
+        return false;
+    }
 
-        for (String md5 : list) {
-            // 更新校验进度
-            checkedCount++;
-            // 只有在非修复状态下才更新主进度，避免闪烁
-            if (!this.currentStep.startsWith("校验失败")) {
-                this.currentProgress = (int) ((float) checkedCount / totalCount * 100);
-            }
+    private List<File> collectFiles(File dir) {
+        List<File> result = new ArrayList<>();
+        if (dir == null || !dir.exists()) return result;
 
-            // 如果文件不存在或 MD5 不匹配（即在 map 中找不到该 MD5 对应的文件）
-            // 注意：这里我们的逻辑是，文件名可能不同，但 MD5 必须匹配。
-            // 但如果之前下载时文件名是确定的，我们也可以直接根据下载后的文件名校验。
-            // 不过 Updater 之前的逻辑是用 MD5 作为 key 来判断是否已存在的。
-            // 这里最简单的方式是：重新扫描目录，看是否包含该 MD5 的文件。
-            
-            boolean exists = false;
-            // 重新扫描目录确保最新状态
-            files = dir.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isFile()) {
-                        if (Tools.getMD5(file.getPath()).equalsIgnoreCase(md5)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (!exists) {
-                LOGGER.warn("文件校验失败 (MD5: " + md5 + ")，尝试重新下载...");
-                this.currentStep = "校验失败，正在修复: " + md5;
-                
-                // 尝试重新下载，最多重试 3 次
-                boolean success = false;
-                for (int i = 0; i < 3; i++) {
-                    this.currentProgress = 0;
-                    Tools.downloadByUrl(server_url + "api/download/" + md5, path, (progress) -> {
-                        this.currentProgress = progress;
-                    });
-                    
-                    // 下载后再次校验
-                    String newMD5 = "";
-                    // 这里的下载逻辑 Tools.downloadByUrl 会返回文件名，我们可以根据文件名去获取文件计算 MD5
-                    // 但 Tools.downloadByUrl 是同步阻塞的，所以执行到这里时文件应该已经下载好了。
-                    // 重新全扫一遍虽然笨，但稳妥。
-                    File[] newFiles = dir.listFiles();
-                    if (newFiles != null) {
-                        for (File file : newFiles) {
-                            if (file.isFile() && Tools.getMD5(file.getPath()).equalsIgnoreCase(md5)) {
-                                newMD5 = md5;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (newMD5.equalsIgnoreCase(md5)) {
-                        success = true;
-                        LOGGER.info("修复成功: " + md5);
-                        break;
-                    } else {
-                        LOGGER.warn("修复失败 (第 " + (i + 1) + " 次尝试)");
-                    }
-                }
-                
-                if (!success) {
-                    this.hasError = true;
-                    this.currentStep = "错误：文件修复失败，请检查网络！";
-                    LOGGER.error("文件最终校验失败: " + md5);
-                    // 可以选择 break 停止，或者继续尝试修复其他文件
-                } else {
-                    // 修复成功后，恢复显示校验状态
-                    this.currentStep = "正在校验文件完整性...";
+        Deque<File> stack = new ArrayDeque<>();
+        stack.push(dir);
+        while (!stack.isEmpty()) {
+            File current = stack.pop();
+            File[] children = current.listFiles();
+            if (children == null) continue;
+
+            for (File child : children) {
+                if (child.isDirectory()) {
+                    stack.push(child);
+                } else if (child.isFile()) {
+                    result.add(child);
                 }
             }
         }
+        return result;
     }
 }

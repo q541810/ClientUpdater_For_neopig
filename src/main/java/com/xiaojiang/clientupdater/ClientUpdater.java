@@ -6,10 +6,23 @@ import com.mojang.logging.LogUtils;
 import com.xiaojiang.clientupdater.screens.UpdateLogScreen;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.LinkedList;
+import java.util.Set;
+import java.util.Collections;
+import java.util.HexFormat;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import net.minecraft.client.resources.language.I18n;
 import net.minecraftforge.client.event.ScreenEvent;
@@ -57,6 +70,7 @@ public class ClientUpdater {
     public void showUpdateMassage(ScreenEvent.Opening event) {
         // 更新逻辑
         if (needshow) {
+            needshow = false;
             Update update = Update.loadJsonFromURL(Config.serverAddress + "api/getupdate");
             if (update == null) {
                 update = new Update();
@@ -67,59 +81,63 @@ public class ClientUpdater {
                 event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, false));
                 LOGGER.warn("Connect Error");
             } else {
-                // 获取本地mod列表
-                Map<String, String> file_list = new HashMap<String, String>();
-                File file_dir = new File("./mods");
-                Queue<File> files = new LinkedList<File>();
-                for (File f : file_dir.listFiles()) {
-                    files.offer(f);
-                }
-                if (files != null) {
-                    while (!files.isEmpty()) {
-                        if (files.peek().isFile()) {
-                            file_list.put(Tools.getMD5(files.peek().getPath()), files.poll().getName());
-                        } else if (files.peek().isDirectory()) {
-                            for (File f : files.poll().listFiles()) {
-                                files.offer(f);
-                            }
-                        }
+                List<String> modsList = update.mods_list == null ? Collections.emptyList() : update.mods_list;
+                List<String> configList = update.config_list == null ? Collections.emptyList() : update.config_list;
+
+                File modsDir = new File("./mods");
+                File configDir = new File("./config");
+                SnapshotInfo snapshotInfo = computeLocalSnapshotInfo(modsDir, configDir);
+                boolean canSkipMd5 = update.update_time != null
+                        && update.update_time.equals(Config.last_update_time)
+                        && !snapshotInfo.snapshot.isEmpty()
+                        && snapshotInfo.snapshot.equals(Config.last_local_snapshot);
+                if (canSkipMd5) {
+                    boolean needupdate = !Config.last_files_match;
+                    if (needupdate) {
+                        event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, true));
+                        Config.setLastUpdateTime(update.update_time);
                     }
+                    return;
                 }
-                // 判断完整性
+
                 boolean needupdate = false;
-                for (String key : update.mods_list) {
-                    if (file_list.get(key) == null) {
+                if (modsList.size() != snapshotInfo.modFileCount) {
+                    needupdate = true;
+                } else if (configList.size() > snapshotInfo.configFileCount) {
+                    needupdate = true;
+                }
+                if (needupdate) {
+                    Config.setLastLocalSnapshot(snapshotInfo.snapshot);
+                    Config.setLastFilesMatch(false);
+                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, true));
+                    Config.setLastUpdateTime(update.update_time);
+                    return;
+                }
+
+                Map<String, String> localMods = computeMd5ToNameMap(new File("./mods"));
+                Set<String> localModMd5Set = localMods.keySet();
+                Set<String> expectedModMd5Set = new HashSet<>(modsList);
+
+                Set<String> expectedConfigMd5Set = new HashSet<>(configList);
+                Set<String> localConfigMd5Set = computeMd5Set(new File("./config"));
+
+                for (String md5 : expectedModMd5Set) {
+                    if (!localModMd5Set.contains(md5)) {
                         needupdate = true;
                     }
                 }
-                for (String key : file_list.keySet()) {
-                    if (update.mods_list.indexOf(key) == -1) {
+                for (String md5 : localModMd5Set) {
+                    if (!expectedModMd5Set.contains(md5)) {
                         needupdate = true;
                     }
                 }
-                // 获取本地config列表
-                file_dir = new File("./config");
-                files = new LinkedList<File>();
-                for (File f : file_dir.listFiles()) {
-                    files.offer(f);
-                }
-                if (files != null) {
-                    while (!files.isEmpty()) {
-                        if (files.peek().isFile()) {
-                            file_list.put(Tools.getMD5(files.peek().getPath()), files.poll().getName());
-                        } else if (files.peek().isDirectory()) {
-                            for (File f : files.poll().listFiles()) {
-                                files.offer(f);
-                            }
-                        }
-                    }
-                }
-                // 对比config列表
-                for (String key : update.config_list) {
-                    if (file_list.get(key) == null) {
+                for (String md5 : expectedConfigMd5Set) {
+                    if (!localConfigMd5Set.contains(md5)) {
                         needupdate = true;
                     }
                 }
+                Config.setLastLocalSnapshot(snapshotInfo.snapshot);
+                Config.setLastFilesMatch(!needupdate);
                 // 更新判断
                 if (needupdate) {
                     event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, needupdate));
@@ -129,8 +147,102 @@ public class ClientUpdater {
                     Config.setLastUpdateTime(update.update_time);
                 }
             }
-            needshow = false;
         }
+    }
+
+    private static final class SnapshotInfo {
+        private final String snapshot;
+        private final int modFileCount;
+        private final int configFileCount;
+
+        private SnapshotInfo(String snapshot, int modFileCount, int configFileCount) {
+            this.snapshot = snapshot;
+            this.modFileCount = modFileCount;
+            this.configFileCount = configFileCount;
+        }
+    }
+
+    private static SnapshotInfo computeLocalSnapshotInfo(File modsDir, File configDir) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            List<String> entries = new ArrayList<>();
+
+            int modCount = addSnapshotEntries(entries, modsDir, "mods");
+            int configCount = addSnapshotEntries(entries, configDir, "config");
+
+            Collections.sort(entries);
+            for (String entry : entries) {
+                md.update(entry.getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+            }
+            String snapshot = HexFormat.of().formatHex(md.digest());
+            return new SnapshotInfo(snapshot, modCount, configCount);
+        } catch (Exception e) {
+            return new SnapshotInfo("", 0, 0);
+        }
+    }
+
+    private static int addSnapshotEntries(List<String> entries, File dir, String prefix) {
+        if (dir == null || !dir.exists()) return 0;
+        Path root = dir.toPath();
+        List<File> files = collectFiles(dir);
+        for (File file : files) {
+            Path rel = root.relativize(file.toPath());
+            String relStr = rel.toString().replace('\\', '/');
+            entries.add(prefix + "|" + relStr + "|" + file.length() + "|" + file.lastModified());
+        }
+        return files.size();
+    }
+
+    private static List<File> collectFiles(File dir) {
+        List<File> result = new ArrayList<>();
+        if (dir == null || !dir.exists()) return result;
+
+        Deque<File> stack = new ArrayDeque<>();
+        stack.push(dir);
+        while (!stack.isEmpty()) {
+            File current = stack.pop();
+            File[] children = current.listFiles();
+            if (children == null) continue;
+            for (File child : children) {
+                if (child.isDirectory()) {
+                    stack.push(child);
+                } else if (child.isFile()) {
+                    result.add(child);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, String> computeMd5ToNameMap(File dir) {
+        List<File> files = collectFiles(dir);
+        int threads = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), 6));
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        Map<String, String> map = new ConcurrentHashMap<>();
+        List<Future<?>> futures = new ArrayList<>();
+        try {
+            for (File file : files) {
+                futures.add(pool.submit(() -> {
+                    String md5 = Tools.getMD5(file);
+                    if (!md5.isEmpty()) {
+                        map.put(md5, file.getName());
+                    }
+                }));
+            }
+            for (Future<?> f : futures) {
+                f.get();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            pool.shutdown();
+        }
+        return new HashMap<>(map);
+    }
+
+    private static Set<String> computeMd5Set(File dir) {
+        return computeMd5ToNameMap(dir).keySet();
     }
     // Add the example block item to the building blocks tab
 

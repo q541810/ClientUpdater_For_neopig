@@ -1,6 +1,5 @@
 package com.xiaojiang.clientupdater;
 
-import org.apache.commons.io.FileUtils;
 import org.slf4j.Logger;
 import com.mojang.logging.LogUtils;
 
@@ -17,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.function.Consumer;
 
 public class Tools {
@@ -25,25 +25,27 @@ public class Tools {
     private static final Logger LOGGER = LogUtils.getLogger();
 
     public static String getMD5(String path) {
-        StringBuffer sb = new StringBuffer();
         try {
+            return getMD5(new File(path));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "";
+    }
+
+    public static String getMD5(File file) {
+        try (InputStream inputStream = Files.newInputStream(file.toPath())) {
             MessageDigest md = MessageDigest.getInstance("MD5");
-            md.update(FileUtils.readFileToByteArray(new File(path)));
-            byte[] b = md.digest();
-            for (int i = 0; i < b.length; i++) {
-                int d = b[i];
-                if (d < 0) {
-                    d = b[i] & 0xff;
-                }
-                if (d < 16) {
-                    sb.append("0");
-                }
-                sb.append(Integer.toHexString(d));
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
             }
+            return HexFormat.of().formatHex(md.digest());
         } catch (NoSuchAlgorithmException | IOException e) {
             e.printStackTrace();
         }
-        return sb.toString();
+        return "";
     }
 
     /**
@@ -82,12 +84,14 @@ public class Tools {
             }
 
             String path = "";
+            String relativePath = fileName;
             // 处理文件名中包含路径的情况，创建对应子目录
             int index = fileName.lastIndexOf("/");
             if (index > -1) {
                 // LOGGER.info(filepath.substring(0, index));
                 path = savePath + '/' + fileName.substring(0, index);
                 fileName = fileName.substring(index + 1, fileName.length());
+                relativePath = relativePath.substring(0, index) + "/" + fileName;
             } else {
                 path = savePath;
             }
@@ -129,7 +133,7 @@ public class Tools {
             // 记录日志
             LOGGER.info("下载完成: " + fileName);
 
-            return fileName;
+            return relativePath;
         } catch (IOException e) {
             e.printStackTrace();
         } finally {

@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.URL;
 import java.net.URLConnection;
+import java.net.HttpURLConnection;
 
 import com.google.gson.Gson;
 import com.mojang.logging.LogUtils;
@@ -26,6 +27,10 @@ public class Update {
             URL urlObject = new URL(url);
             URLConnection uc = urlObject.openConnection();
             uc.setRequestProperty("User-Agent", "Mozilla/4.76");
+            if (uc instanceof HttpURLConnection) {
+                ((HttpURLConnection) uc).setConnectTimeout(2000);
+                ((HttpURLConnection) uc).setReadTimeout(5000);
+            }
             BufferedReader in = new BufferedReader(new InputStreamReader(uc.getInputStream(), "utf-8"));
             String inputLine = null;
             while ((inputLine = in.readLine()) != null) {
@@ -34,8 +39,8 @@ public class Update {
             in.close();
         } catch (Exception e) {
             e.printStackTrace();
+            return null;
         }
-        LOGGER.info(json.toString());
         return Update.complexJsonToObj(json.toString(), Update.class);
     }
 
