@@ -78,7 +78,7 @@ public class ClientUpdater {
                 update.update_logs = I18n.get("gui.clientupdater.unknowhost");
                 update.mods_list = null;
                 update.config_list = null;
-                event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, false));
+                event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, false, Collections.emptyList()));
                 LOGGER.warn("Connect Error");
             } else {
                 List<String> modsList = update.mods_list == null ? Collections.emptyList() : update.mods_list;
@@ -90,31 +90,26 @@ public class ClientUpdater {
                 boolean canSkipMd5 = update.update_time != null
                         && update.update_time.equals(Config.last_update_time)
                         && !snapshotInfo.snapshot.isEmpty()
-                        && snapshotInfo.snapshot.equals(Config.last_local_snapshot);
+                        && snapshotInfo.snapshot.equals(Config.last_local_snapshot)
+                        && Config.last_files_match;
                 if (canSkipMd5) {
-                    boolean needupdate = !Config.last_files_match;
-                    if (needupdate) {
-                        event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, true));
-                        Config.setLastUpdateTime(update.update_time);
-                    }
                     return;
                 }
 
                 boolean needupdate = false;
-                if (modsList.size() != snapshotInfo.modFileCount) {
-                    needupdate = true;
-                } else if (configList.size() > snapshotInfo.configFileCount) {
+                if (configList.size() > snapshotInfo.configFileCount) {
                     needupdate = true;
                 }
+                List<String> localExtraModNames = computeLocalExtraModNames(modsList);
                 if (needupdate) {
                     Config.setLastLocalSnapshot(snapshotInfo.snapshot);
                     Config.setLastFilesMatch(false);
-                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, true));
+                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, true, localExtraModNames));
                     Config.setLastUpdateTime(update.update_time);
                     return;
                 }
 
-                Map<String, String> localMods = computeMd5ToNameMap(new File("./mods"));
+                Map<String, String> localMods = computeMd5ToNameMap(new File("./mods"), false);
                 Set<String> localModMd5Set = localMods.keySet();
                 Set<String> expectedModMd5Set = new HashSet<>(modsList);
 
@@ -128,7 +123,10 @@ public class ClientUpdater {
                 }
                 for (String md5 : localModMd5Set) {
                     if (!expectedModMd5Set.contains(md5)) {
-                        needupdate = true;
+                        String fileName = localMods.get(md5);
+                        if (!Config.isModWhitelisted(fileName)) {
+                            needupdate = true;
+                        }
                     }
                 }
                 for (String md5 : expectedConfigMd5Set) {
@@ -140,13 +138,32 @@ public class ClientUpdater {
                 Config.setLastFilesMatch(!needupdate);
                 // 更新判断
                 if (needupdate) {
-                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, needupdate));
+                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, needupdate, localExtraModNames));
                     Config.setLastUpdateTime(update.update_time);
                 } else if (!update.update_time.equals(Config.last_update_time)) {
-                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, needupdate));
+                    event.setNewScreen(new UpdateLogScreen(Config.serverAddress, update, needupdate, localExtraModNames));
                     Config.setLastUpdateTime(update.update_time);
                 }
             }
+        }
+    }
+
+    private static List<String> computeLocalExtraModNames(List<String> expectedModMd5List) {
+        try {
+            Map<String, String> localMods = computeMd5ToNameMap(new File("./mods"), false);
+            Set<String> expected = new HashSet<>(expectedModMd5List == null ? Collections.emptyList() : expectedModMd5List);
+            Set<String> names = new HashSet<>();
+            for (Map.Entry<String, String> entry : localMods.entrySet()) {
+                if (!expected.contains(entry.getKey()) && entry.getValue() != null && !entry.getValue().isEmpty()) {
+                    names.add(entry.getValue());
+                }
+            }
+            List<String> result = new ArrayList<>(names);
+            Collections.sort(result, String.CASE_INSENSITIVE_ORDER);
+            return result;
+        } catch (Exception e) {
+            LOGGER.warn("Failed to collect local extra mods", e);
+            return Collections.emptyList();
         }
     }
 
@@ -167,7 +184,7 @@ public class ClientUpdater {
             MessageDigest md = MessageDigest.getInstance("MD5");
             List<String> entries = new ArrayList<>();
 
-            int modCount = addSnapshotEntries(entries, modsDir, "mods");
+            int modCount = addSnapshotEntries(entries, modsDir, "mods", false);
             int configCount = addSnapshotEntries(entries, configDir, "config");
 
             Collections.sort(entries);
@@ -183,9 +200,13 @@ public class ClientUpdater {
     }
 
     private static int addSnapshotEntries(List<String> entries, File dir, String prefix) {
+        return addSnapshotEntries(entries, dir, prefix, true);
+    }
+
+    private static int addSnapshotEntries(List<String> entries, File dir, String prefix, boolean recursive) {
         if (dir == null || !dir.exists()) return 0;
         Path root = dir.toPath();
-        List<File> files = collectFiles(dir);
+        List<File> files = collectFiles(dir, recursive);
         for (File file : files) {
             Path rel = root.relativize(file.toPath());
             String relStr = rel.toString().replace('\\', '/');
@@ -195,6 +216,10 @@ public class ClientUpdater {
     }
 
     private static List<File> collectFiles(File dir) {
+        return collectFiles(dir, true);
+    }
+
+    private static List<File> collectFiles(File dir, boolean recursive) {
         List<File> result = new ArrayList<>();
         if (dir == null || !dir.exists()) return result;
 
@@ -206,7 +231,9 @@ public class ClientUpdater {
             if (children == null) continue;
             for (File child : children) {
                 if (child.isDirectory()) {
-                    stack.push(child);
+                    if (recursive) {
+                        stack.push(child);
+                    }
                 } else if (child.isFile()) {
                     result.add(child);
                 }
@@ -216,7 +243,11 @@ public class ClientUpdater {
     }
 
     private static Map<String, String> computeMd5ToNameMap(File dir) {
-        List<File> files = collectFiles(dir);
+        return computeMd5ToNameMap(dir, true);
+    }
+
+    private static Map<String, String> computeMd5ToNameMap(File dir, boolean recursive) {
+        List<File> files = collectFiles(dir, recursive);
         int threads = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), 6));
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         Map<String, String> map = new ConcurrentHashMap<>();

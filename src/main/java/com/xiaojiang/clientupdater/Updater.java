@@ -39,6 +39,9 @@ public class Updater extends Thread {
         File files[] = file_dir.listFiles();
         if (files != null) {
             for (File file : files) {
+                if (file.isDirectory()) {
+                    continue;
+                }
                 if (file.isFile()) {
                     file_list.put(Tools.getMD5(file.getPath()), file.getName());
                 }
@@ -46,9 +49,15 @@ public class Updater extends Thread {
         }
         for (String key : file_list.keySet()) {// 删除mod
             if (update.mods_list.indexOf(key) == -1) {
-                File mod = new File("./mods/" + file_list.get(key));
-                if (!mod.delete())
-                    LOGGER.error("Can't delete the mod!");
+                String fileName = file_list.get(key);
+                if (Config.isModWhitelisted(fileName)) {
+                    LOGGER.info("Skip deleting whitelisted mod: " + fileName);
+                    continue;
+                }
+                File mod = new File("./mods/" + fileName);
+                if (!mod.delete()) {
+                    LOGGER.error("Can't delete the mod: " + fileName);
+                }
             }
         }
         for (String key : update.mods_list) {// 下载mod
